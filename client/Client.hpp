@@ -32,7 +32,7 @@ public:
     explicit Socket(int fd) : fd_(fd) {
         if (fd_ != -1 && !setNonBlocking(fd_)) {
             Close();
-            throw std::runtime_error("Failed to set socket non-blocking");
+            std::cerr<<"Failed to set socket non-blocking"<<std::endl;
         }
     }
     
@@ -90,7 +90,7 @@ public:
     explicit Epoll(size_t max_events = 1024) : max_events_(max_events) {
         epfd_ = epoll_create1(EPOLL_CLOEXEC);
         if (epfd_ == -1) {
-            throw std::runtime_error("epoll_create1 failed: " + std::string(strerror(errno)));
+           std::cerr<<"epoll_create1 failed: " + std::string(strerror(errno))<<std::endl;
         }
     }
     
