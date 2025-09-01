@@ -6,13 +6,25 @@
 #include<unistd.h>
 #include<cstring>
 #include<vector>
+#include<fcntl.h>
 
 constexpr int USER_LIMIT = 5;
 constexpr int BUFFER_SIZE = 1024;
 constexpr int FD_LIMIT = 65535;
 
-class Users{
-public:
+
+int setnoblocking(int fd){
+    int old_flag = fcntl(fd,F_GETFL,0);
+    if(old_flag == -1){
+        std::cerr<<"set nonblock erro: "<<strerror(errno)<<std::endl;
+        return -1;
+    }
+    int new_flag = old_flag | O_NONBLOCK;
+    fcntl(fd,F_SETFL,new_flag);
+    return old_flag;
+}
+
+struct Users{
     struct sockaddr_in addr;
     char* write_buff;
     char read_buff[BUFFER_SIZE];
@@ -167,13 +179,77 @@ public:
         return instance;
     }
 
-    int ListenConnect(std::string IP,std::string port){
+    void ListenConnect(std::string IP,std::string port){
         Bind(std::move(IP),std::move(port));
         Listen(BUFFER_SIZE);
     }
 
     void Run(){
+        int user_counter = 0;
+        while(1){
+            int ret = epoll_.Wait(revents_.data(),-1);
+            for(int i = 0; i < user_counter+1; ++i){
+                if((revents_[i].data.fd == listen_fd_)&&(revents_[i].events & EPOLLIN)){
+                    struct sockaddr_in client_addr{};
+                    socklen_t len = sizeof(client_addr);
+                    Socket client_sock(accept(listen_fd_,reinterpret_cast<struct sockaddr*>(&client_addr),&len));
+                    if(client_sock == -1){
+                        std::cerr<<"accept error:"<<strerror(errno)<<std::endl;
+                        continue;
+                    }
+                    if(user_counter >= USER_LIMIT){
+                        std::string info = "there are too many users, please wait";
+                        send(client_sock,info.data(),sizeof(info),0);
+                        client_sock.Close();
+                        continue;
+                    }
+                    setnoblocking(client_sock);
+                    epoll_.Add(client_sock,EPOLLIN|EPOLLHUP|EPOLLERR);
+                    users_[client_sock].addr = client_addr;
+                    ++user_counter;
+                }
+                else if(revents_[i].events & (EPOLLHUP | EPOLLERR)){
+                    int temp_fd = revents_[i].data.fd;
+                    epoll_.Remove(temp_fd);
+                    --user_counter;
+                    --ret;
+                    revents_[i] = revents_[ret];
+                    --i;
+                    std::cerr<<"infor: one user left"<<std::endl;
+                    continue;
+                }
+                else if(revents_[i].events & EPOLLIN){
+                    int temp_fd = revents_[i].data.fd;
 
+                    memset(users_[temp_fd].read_buff,'\0',BUFFER_SIZE);
+                    if(recv(temp_fd,users_[temp_fd].read_buff,BUFFER_SIZE-1,0) < 0){
+                        std::cerr<<"revevie error: "<<strerror(errno)<<std::endl;
+                        continue;
+                    }
+                    for(int j = 0; j < ret; ++j){
+                        if(revents_[j].data.fd == listen_fd_ || revents_[j].data.fd == listen_fd_){
+                            continue;
+                        }
+                        users_[revents_[j].data.fd].write_buff = users_[temp_fd].read_buff;
+                        revents_[j].events |= ~EPOLLIN;
+                        revents_[j].events |= EPOLLOUT;
+                    }
+                }
+                else if(revents_[i].events & EPOLLOUT){
+                    int temp_fd = revents_[i].data.fd;
+                    if(!users_[temp_fd].write_buff){
+                        continue;
+                    }
+                    int data_len = send(temp_fd,users_[temp_fd].write_buff,sizeof(users_[temp_fd].write_buff),0);
+                    if(data_len < 0){
+                        std::cerr<<"send error: "<<strerror(errno)<<std::endl;
+                    }
+                    revents_[i].events |= EPOLLIN;
+                    revents_[i].events |= ~EPOLLOUT;
+                }
+
+            }
+        }
     }
 
 private:
@@ -206,6 +282,6 @@ private:
 private:
     Socket listen_fd_;
     Epoll epoll_;
-    std::vector<Users> users_;
-
+    std::vector<struct Users> users_{FD_LIMIT};
+    std::vector<struct epoll_event> revents_;
 };
