@@ -186,6 +186,7 @@ public:
 
     void Run(){
         int user_counter = 0;
+        revents_.resize(FD_LIMIT);
         while(1){
             int ret = epoll_.Wait(revents_.data(),-1);
             for(int i = 0; i < user_counter+1; ++i){
@@ -211,6 +212,7 @@ public:
                 else if(revents_[i].events & (EPOLLHUP | EPOLLERR)){
                     int temp_fd = revents_[i].data.fd;
                     epoll_.Remove(temp_fd);
+                    users_[temp_fd] = Users{};
                     --user_counter;
                     --ret;
                     revents_[i] = revents_[ret];
@@ -227,7 +229,7 @@ public:
                         continue;
                     }
                     for(int j = 0; j < ret; ++j){
-                        if(revents_[j].data.fd == listen_fd_ || revents_[j].data.fd == listen_fd_){
+                        if(revents_[j].data.fd == listen_fd_ || revents_[j].data.fd == temp_fd){
                             continue;
                         }
                         users_[revents_[j].data.fd].write_buff = users_[temp_fd].read_buff;
@@ -246,6 +248,7 @@ public:
                     }
                     revents_[i].events |= EPOLLIN;
                     revents_[i].events |= ~EPOLLOUT;
+                    users_[temp_fd].write_buff = nullptr;
                 }
 
             }
