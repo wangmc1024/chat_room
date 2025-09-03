@@ -208,6 +208,7 @@ public:
     
     // 事件处理主循环
     void run() {
+        int wait_times = 0;
         while (true) {
             int ready = epoll_.Wait(events_, -1); // 无限等待，直到有事件发生
             
@@ -219,29 +220,41 @@ public:
                 std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
                 break;
             }
+
+            if(wait_times == 5){
+                std::cerr<<"服务端关闭连接"<<std::endl;
+                break;
+            }
             
             for (int i = 0; i < ready; ++i) {
-                handleEvent(events_[i]);
+                if(handleEvent(events_[i])==-1){
+                    ++wait_times;
+                    break;
+                }
             }
         }
     }
 
 private:
     // 处理单个事件
-    void handleEvent(const struct epoll_event& ev) {
+    int handleEvent(const struct epoll_event& ev) {
         if (ev.events & (EPOLLERR | EPOLLHUP)) {
             handleErrorEvent(ev);
-            return;
+            return -1;
         }
         
         if (ev.events & EPOLLIN) {
             handleReadEvent(ev);
+            return 0;
         }
         
         if (ev.events & EPOLLOUT) {
             // 可写事件（当前代码未使用，预留接口）
             handleWriteEvent(ev);
+            return 0;
         }
+
+        return -1;
     }
     
     void handleErrorEvent(const struct epoll_event& ev) {
@@ -317,6 +330,7 @@ private:
             close(fd);
             return;
         }
+
         
         if (bytes_read == 0) {
             // 连接关闭
@@ -325,6 +339,8 @@ private:
             close(fd);
             return;
         }
+
+        std::cout<<buffer<<std::endl;
         
     }
 
