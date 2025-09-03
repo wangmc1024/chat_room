@@ -5,12 +5,15 @@
 #include<netinet/in.h>
 #include<unistd.h>
 #include<cstring>
+#include<unordered_map>
 #include<vector>
 #include<fcntl.h>
+#include <utility>
 
 constexpr int USER_LIMIT = 5;
 constexpr int BUFFER_SIZE = 1024;
 constexpr int FD_LIMIT = 65535;
+
 
 
 int setnoblocking(int fd){
@@ -51,8 +54,10 @@ public:
         return *this;
     }
 
+    int value() const {return fd_;}
+
     operator int(){
-        return fd_;
+        return this->value();
     }
 
     bool Reset(int fd){
@@ -77,6 +82,19 @@ private:
     int fd_;
 };
 
+
+// namespace std{
+//     template<>
+//     struct hash<Socket>{
+//         size_t operator()(const Socket& socket)const noexcept{
+//             return hash<int>()(socket.value());
+//         }
+//     };
+// }
+
+// bool operator==(const Socket&lhs,const Socket&rhs){
+//     return lhs.value() == rhs.value();
+// }
 
 class Epoll{
 public:
@@ -185,38 +203,38 @@ public:
     }
 
     void Run(){
-        int user_counter = 0;
         revents_.resize(FD_LIMIT);
         while(1){
             int ret = epoll_.Wait(revents_.data(),-1);
-            for(int i = 0; i < user_counter+1; ++i){
+            for(int i = 0; i < ret; ++i){
                 if((revents_[i].data.fd == listen_fd_)&&(revents_[i].events & EPOLLIN)){
                     struct sockaddr_in client_addr{};
                     socklen_t len = sizeof(client_addr);
-                    Socket client_sock(accept(listen_fd_,reinterpret_cast<struct sockaddr*>(&client_addr),&len));
+                    Socket client_sock(accept(listen_fd_.value(),reinterpret_cast<struct sockaddr*>(&client_addr),&len));
                     if(client_sock == -1){
                         std::cerr<<"accept error:"<<strerror(errno)<<std::endl;
                         continue;
                     }
-                    if(user_counter >= USER_LIMIT){
+                    if(ret >= USER_LIMIT){
                         std::string info = "there are too many users, please wait";
-                        send(client_sock,info.data(),sizeof(info),0);
-                        client_sock.Close();
+                        send(client_sock.value(),info.data(),sizeof(info),0);
+                        close(client_sock.value());
                         continue;
                     }
-                    setnoblocking(client_sock);
-                    epoll_.Add(client_sock,EPOLLIN|EPOLLHUP|EPOLLERR);
-                    users_[client_sock].addr = client_addr;
-                    ++user_counter;
+                    setnoblocking(client_sock.value());
+                    epoll_.Add(client_sock.value(),EPOLLIN|EPOLLHUP|EPOLLERR);
+                    users_[client_sock.value()].addr = client_addr;
+                    this->client_sock_.insert(std::make_pair(client_sock.value(),std::move(client_sock)));
+                    std::cout<<"one user enter"<<std::endl;
                 }
                 else if(revents_[i].events & (EPOLLHUP | EPOLLERR)){
                     int temp_fd = revents_[i].data.fd;
                     epoll_.Remove(temp_fd);
                     users_[temp_fd] = Users{};
-                    --user_counter;
                     --ret;
                     revents_[i] = revents_[ret];
                     --i;
+                    client_sock_.erase(temp_fd);
                     std::cerr<<"infor: one user left"<<std::endl;
                     continue;
                 }
@@ -228,13 +246,13 @@ public:
                         std::cerr<<"revevie error: "<<strerror(errno)<<std::endl;
                         continue;
                     }
+                    std::cout<<"from client:"<<users_[temp_fd].read_buff<<std::endl;
                     for(int j = 0; j < ret; ++j){
                         if(revents_[j].data.fd == listen_fd_ || revents_[j].data.fd == temp_fd){
                             continue;
                         }
                         users_[revents_[j].data.fd].write_buff = users_[temp_fd].read_buff;
-                        revents_[j].events |= ~EPOLLIN;
-                        revents_[j].events |= EPOLLOUT;
+                       epoll_.Modify(temp_fd, EPOLLOUT | EPOLLHUP | EPOLLERR);
                     }
                 }
                 else if(revents_[i].events & EPOLLOUT){
@@ -242,12 +260,11 @@ public:
                     if(!users_[temp_fd].write_buff){
                         continue;
                     }
-                    int data_len = send(temp_fd,users_[temp_fd].write_buff,sizeof(users_[temp_fd].write_buff),0);
+                    int data_len = send(temp_fd,users_[temp_fd].write_buff,strlen(users_[temp_fd].write_buff),0);
                     if(data_len < 0){
                         std::cerr<<"send error: "<<strerror(errno)<<std::endl;
                     }
-                    revents_[i].events |= EPOLLIN;
-                    revents_[i].events |= ~EPOLLOUT;
+                    epoll_.Modify(temp_fd, EPOLLIN | EPOLLHUP | EPOLLERR);
                     users_[temp_fd].write_buff = nullptr;
                 }
 
@@ -259,7 +276,7 @@ private:
     TcpServer(){
         listen_fd_ = socket(PF_INET,SOCK_STREAM,0);
         epoll_ = Epoll();
-        epoll_.Add(listen_fd_,EPOLLIN);
+        epoll_.Add(listen_fd_.value(),EPOLLIN);
     }
 
     void Bind(std::string&& IP,std::string&& port){
@@ -270,15 +287,19 @@ private:
         server_addr.sin_port = htons(port_);
         inet_pton(AF_INET,IP.data(),&server_addr.sin_addr);
 
-        int ret = bind(listen_fd_,reinterpret_cast<struct sockaddr*>(&server_addr),sizeof(server_addr));
+        int reuse = 1;
+        setsockopt(listen_fd_.value(),SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
+
+        int ret = bind(listen_fd_.value(),reinterpret_cast<struct sockaddr*>(&server_addr),sizeof(server_addr));
         if(ret == -1){
             std::cerr<<"bind error: "<<strerror(errno)<<std::endl;
         }
     }
 
     void Listen(int backlog){
-        if(listen(listen_fd_,backlog)==-1){
+        if(listen(listen_fd_.value(),backlog)==-1){
             std::cerr<<"listen error: "<<strerror(errno)<<std::endl;
+            return;
         }
     }
 
@@ -287,4 +308,6 @@ private:
     Epoll epoll_;
     std::vector<struct Users> users_{FD_LIMIT};
     std::vector<struct epoll_event> revents_;
+    std::unordered_map<int,Socket> client_sock_{USER_LIMIT};
+  
 };
