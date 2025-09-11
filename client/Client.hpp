@@ -80,6 +80,15 @@ public:
         return setNonBlocking(fd_);
     }
    
+    bool isConnected(){
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if(getsockopt(fd_,SOL_SOCKET,SO_ERROR,&error,&len)==-1){
+            std::cerr<<"connect error: "<<strerror(errno)<<std::endl;
+            return false;
+        }
+        return error == 0;
+    }
 
 private:
     int fd_;
@@ -208,6 +217,7 @@ public:
     
     // 事件处理主循环
     void run() {
+      
         int wait_times = 0;
         while (true) {
             int ready = epoll_.Wait(events_, -1); // 无限等待，直到有事件发生
@@ -239,55 +249,75 @@ private:
     // 处理单个事件
     int handleEvent(const struct epoll_event& ev) {
         if (ev.events & (EPOLLERR | EPOLLHUP)) {
-            handleErrorEvent(ev);
-            return -1;
+            return handleErrorEvent(ev);
         }
         
         if (ev.events & EPOLLIN) {
-            handleReadEvent(ev);
-            return 0;
+            return handleReadEvent(ev);
         }
         
         if (ev.events & EPOLLOUT) {
-            // 可写事件（当前代码未使用，预留接口）
-            handleWriteEvent(ev);
-            return 0;
+            return handleWriteEvent(ev);
         }
-
-        return -1;
+        return 0;
     }
     
-    void handleErrorEvent(const struct epoll_event& ev) {
-        int fd = (ev.data.ptr) ? -1 : ev.data.fd;
+    int handleErrorEvent(const struct epoll_event& ev) {
+        //int fd = (ev.data.ptr) ? -1 : ev.data.fd;
+        int fd = ev.data.fd;
         std::cerr << "Error event for fd " << fd << std::endl;
         
         if (fd != -1) {
             epoll_.Remove(fd);
             close(fd); 
         }
+        return -1;
     }
     
     // 处理可读事件
-    void handleReadEvent(const struct epoll_event& ev) {
-        int fd = (ev.data.ptr) ? -1 : ev.data.fd;
+    int handleReadEvent(const struct epoll_event& ev) {
+        if(is_connected_ == false){
+            std::cerr<<"the connection is not builded"<<std::endl;
+            return -1;
+        }
+        //int fd = (ev.data.ptr) ? -1 : ev.data.fd;
+        int fd = ev.data.fd;
         if (fd == 0) {
-            handleStdin();
+           return handleStdin();
         } else if (fd != -1) {
-            handleSocketRead(fd);
+            return handleSocketRead(fd);
+        }
+        return -1;
+    }
+    
+    // 处理可写事件
+    int handleWriteEvent(const struct epoll_event& ev) {
+        //int fd = (ev.data.ptr) ? -1 : ev.data.fd;
+        int fd = ev.data.fd;
+        if(fd != -1){
+            
+            if(fd == server_sock_ && is_connected_ == false){
+                if(server_sock_.isConnected()==true){
+                    is_connected_ = true;
+                    epoll_.Modify(server_sock_,EPOLLIN);
+                }
+            }
+        return 0;
+        }
+        else{
+            epoll_.Remove(fd);
+            server_sock_.Close();
+            std::cerr<<"the write operation is wrong"<<std::endl;
+            return -1;
         }
     }
     
-    // 处理可写事件（预留）
-    void handleWriteEvent(const struct epoll_event& /*ev*/) {
-        // 可在此添加处理可写事件的逻辑
-    }
-    
     // 处理标准输入
-    void handleStdin() {
+    int handleStdin() {
         int pipefd[2];
         if (pipe(pipefd) == -1) {
             std::cerr << "pipe creation failed: " << strerror(errno) << std::endl;
-            return;
+            return -1;
         }
         
         // 设置管道为非阻塞
@@ -301,7 +331,7 @@ private:
             std::cerr << "splice from stdin failed: " << strerror(errno) << std::endl;
             close(pipefd[0]);
             close(pipefd[1]);
-            return;
+            return -1;
         }
         
         n = splice(pipefd[0], nullptr, server_sock_, nullptr, 
@@ -310,25 +340,29 @@ private:
             std::cerr << "splice from stdin failed: " << strerror(errno) << std::endl;
             close(pipefd[0]);
             close(pipefd[1]);
-            return;
+            return -1;
         }
         
         // 关闭管道
         close(pipefd[0]);
         close(pipefd[1]);
+        return 0;
     }
     
     // 处理socket读取
-    void handleSocketRead(int fd) {
+    int handleSocketRead(int fd) {
         char buffer[1024];
         memset(buffer,'\0',sizeof(buffer));
         ssize_t bytes_read = recv(fd, buffer, sizeof(buffer) - 1, 0);
         
         if (bytes_read == -1) {
+            if(errno == EWOULDBLOCK || errno == EAGAIN){
+               return 0;
+            }
             std::cerr << "recv error for fd " << fd << ": " << strerror(errno) << std::endl;
             epoll_.Remove(fd);
             close(fd);
-            return;
+            return -1;
         }
 
         
@@ -337,16 +371,20 @@ private:
             std::cout << "Connection closed for fd " << fd << std::endl;
             epoll_.Remove(fd);
             close(fd);
-            return;
+            return 0;
         }
 
-        std::cout<<buffer<<std::endl;
-        
+        if(bytes_read != -1){
+            std::cout<<buffer<<std::flush;
+            return 0;
+        }
+        return 0;
     }
 
 private:
     Epoll epoll_;
     Socket server_sock_;
+    bool is_connected_ = false;
     static constexpr size_t MAX_EVENTS = 1024;
     struct epoll_event events_[MAX_EVENTS];
 };

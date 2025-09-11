@@ -22,10 +22,15 @@ int main(int argc, char* argv[]){
 
     Socket server_sock(socket(PF_INET,SOCK_STREAM,0));
 
-    connect(server_sock,reinterpret_cast<struct sockaddr*>(&server_addr),sizeof(server_addr));
+    int ret = connect(server_sock,reinterpret_cast<struct sockaddr*>(&server_addr),sizeof(server_addr));
+
+    if(ret == -1 && errno != EWOULDBLOCK && errno != EINPROGRESS){
+        std::cerr<<"connect error: "<<std::string(strerror(errno))<<std::endl;
+        return EXIT_FAILURE;
+    }
 
     Epoll e;
-    e.Add(server_sock,EPOLLIN);
+    e.Add(server_sock,EPOLLIN | EPOLLOUT);
     e.Add(STDIN_FILENO,EPOLLIN);
 
     EpollHandle eh(std::move(e),std::move(server_sock));
